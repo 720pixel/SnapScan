@@ -2,15 +2,21 @@ import cv2
 import numpy as np
 from PIL import Image
 import os
+import sys
+import io
 import argparse
 import time
 from datetime import datetime, timedelta
 from tqdm import tqdm
 import shutil
-import subprocess
 from retinaface import RetinaFace
 
+
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
 YUNET_MODEL_PATH = "face_detection_yunet_2023mar.onnx"
+DB_FOLDER = "DB"
 
 def load_file(file_path):
     if file_path.lower().endswith(('.png', '.jpg', '.jpeg')):
@@ -21,14 +27,11 @@ def load_file(file_path):
         raise ValueError("Unsupported file format")
 
 def detect_faces(image, mode):
-    faces = []
-    
     if mode == 1:  # OpenCV Haar Cascade
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-        opencv_faces = face_cascade.detectMultiScale(gray, 1.1, 4)
-        faces.extend([{'box': list(face), 'model': 'OpenCV'} for face in opencv_faces])
-    
+        faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+        return [{'box': list(face)} for face in faces]
     elif mode == 2:  # YuNet
         height, width, _ = image.shape
         yunet_detector = cv2.FaceDetectorYN.create(
@@ -39,16 +42,11 @@ def detect_faces(image, mode):
             0.3,  # nms threshold
             5000  # top k
         )
-        _, yunet_faces = yunet_detector.detect(image)
-        if yunet_faces is not None:
-            faces.extend([{'box': list(face[:4]), 'model': 'YuNet'} for face in yunet_faces])
-    
+        _, faces = yunet_detector.detect(image)
+        return [{'box': list(face[:4])} for face in faces] if faces is not None else []
     elif mode == 3:  # RetinaFace
-        retina_faces = RetinaFace.detect_faces(image)
-        if retina_faces:
-            faces.extend([{'box': list(face['facial_area']), 'model': 'RetinaFace'} for face in retina_faces.values()])
-    
-    return faces
+        faces = RetinaFace.detect_faces(image)
+        return [{'box': list(face['facial_area'])} for face in faces.values()]
 
 def extract_face(image, face, margin=0.5):
     x, y, w, h = map(int, face['box'])
@@ -103,13 +101,18 @@ def save_full_frame(frame, face, output_path, index, no_folder=False, debug=Fals
     cv2.circle(overlay, center, radius, (0, 255, 0), -1)
     cv2.addWeighted(overlay, 0.2, frame_with_circle, 0.8, 0, frame_with_circle)
     
-    label = f"Face {index} ({face['model']})"
+    label = f"Face {index}"
     cv2.putText(frame_with_circle, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
     
     file_path = os.path.join(output_path, f"Face_{index}_Frame.png") if no_folder else f"{output_path}/Face_{index}_Frame.png"
     cv2.imwrite(file_path, frame_with_circle, [cv2.IMWRITE_PNG_COMPRESSION, 0])
     if debug:
         print(f"Full frame for face {index} saved.")
+
+def add_to_db(face_image_path):
+    if not os.path.exists(DB_FOLDER):
+        os.makedirs(DB_FOLDER)
+    shutil.copy(face_image_path, DB_FOLDER)
 
 def process_frame(frame, mode, output_path, frame_index, face_count, max_faces, no_folder=False, debug=False):
     if debug:
@@ -124,6 +127,7 @@ def process_frame(frame, mode, output_path, frame_index, face_count, max_faces, 
         
         face_path = save_face(face_image, face_folder, face_count['value'] + 1, no_folder, debug)
         save_full_frame(frame, face, face_folder, face_count['value'] + 1, no_folder, debug)
+        add_to_db(face_path)  # Add face to DB
         face_count['value'] += 1
         unique_faces += 1
     
@@ -202,6 +206,7 @@ def process_image(image_path, output_path, mode, max_faces, no_folder=False, deb
             
             face_path = save_face(face_image, face_folder, face_count['value'] + 1, no_folder, debug)
             save_full_frame(image, face, face_folder, face_count['value'] + 1, no_folder, debug)
+            add_to_db(face_path)  # Add face to DB
             face_count['value'] += 1
             
             pbar.update(1)
@@ -211,7 +216,7 @@ def process_image(image_path, output_path, mode, max_faces, no_folder=False, deb
     return face_count['value'], 1
 
 def main():
-    parser = argparse.ArgumentParser(description="SnapScan - Advanced Face Detection and Recognition Tool")
+    parser = argparse.ArgumentParser(description="Advanced Face Detection and Recognition Application")
     parser.add_argument("-i", "--input", required=True, help="Path to input file (image or video)")
     parser.add_argument("-o", "--output", default="output", help="Path to output directory")
     parser.add_argument("-r", "--range", help="Time range for video processing (format: MM.SS-MM.SS or SS-SS)")
@@ -220,32 +225,22 @@ def main():
     parser.add_argument("-nf", "--no-folder", action="store_true", help="Save all outputs in the main output directory without creating separate folders for each face")
     parser.add_argument("-m", "--match", action="store_true", help="Match the input image to the database")
     parser.add_argument("-dupes", "--detect-duplicates", action="store_true", help="Detect and remove duplicate faces after processing")
-    parser.add_argument("-mode", type=str, default="1", help="Mode for face detection, duplicate detection, and matching. 1: OpenCV, 2: YuNet, 3: RetinaFace (default: 1)")
+    parser.add_argument("-mode", type=int, choices=[1, 2, 3], default=1, help="1: OpenCV, 2: YuNet, 3: RetinaFace (default: 1)")
     args = parser.parse_args()
-
-    mode = int(args.mode)
-
-    if args.match:
-        if not os.path.isfile(args.input):
-            print(f"Error: Input file {args.input} does not exist or is not a file.")
-            return
-        print(f"Matching face in {args.input} to database...")
-        result = subprocess.run(['python', 'dupedetector.py', '-m', args.input, '-mode', str(mode)], capture_output=True, text=True)
-        print(result.stdout)
-        if result.returncode != 0:
-            print(f"Error occurred while matching face: {result.stderr}")
-        return
 
     if not os.path.exists(args.output):
         os.makedirs(args.output)
+
+    if not os.path.exists(DB_FOLDER):
+        os.makedirs(DB_FOLDER)
 
     start_time = time.time()
 
     print(f"Processing file: {args.input}")
     if args.input.lower().endswith(('.mp4', '.mkv')):
-        total_faces, total_frames = process_video(args.input, args.output, mode, args.range, args.number, args.no_folder, args.debug)
+        total_faces, total_frames = process_video(args.input, args.output, args.mode, args.range, args.number, args.no_folder, args.debug)
     else:
-        total_faces, total_frames = process_image(args.input, args.output, mode, args.number, args.no_folder, args.debug)
+        total_faces, total_frames = process_image(args.input, args.output, args.mode, args.number, args.no_folder, args.debug)
 
     end_time = time.time()
     processing_time = end_time - start_time
@@ -253,13 +248,11 @@ def main():
     print(f"\nProcessing completed in {processing_time:.2f} seconds.")
     print(f"Detected {total_faces} unique faces in {total_frames} frames/images.")
     print(f"Output saved to {args.output}")
+    print(f"Faces added to database in {DB_FOLDER}")
 
     if args.detect_duplicates:
         print("Detecting and removing duplicate faces...")
-        result = subprocess.run(['python', 'dupedetector.py', '-d', args.output, '-mode', str(mode)], capture_output=True, text=True)
-        print(result.stdout)
-        if result.returncode != 0:
-            print(f"Error occurred while detecting duplicates: {result.stderr}")
+        # Implement duplicate detection logic here
 
 if __name__ == "__main__":
     main()
