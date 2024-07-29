@@ -3,3 +3,5 @@ numpy
 pillow
 tqdm
 retinaface
+PyQt6
+tensorflow
