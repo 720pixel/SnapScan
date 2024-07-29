@@ -5,3 +5,4 @@ tqdm
 retinaface
 PyQt6
 tensorflow
+tf_keras
