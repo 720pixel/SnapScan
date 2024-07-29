@@ -108,6 +108,13 @@ python3 dupedetector.py -d output_folder -mode 3
 python3 dupedetector.py -m query_image.jpg -mode 2
 ```
 
+## GUi (Beta)
+```sh
+python3 SnapScan.py or Double Click and open with python
+```
+![image](https://github.com/user-attachments/assets/a99bbbca-97cf-4bfe-9c7e-09e6a073763a)
+
+
 ## Contributing
 
 Contributions are welcome! Feel free to submit a pull request or open an issue to discuss new features or report bugs.
